@@ -79,8 +79,16 @@ su Retool spariscono dalla copia locale. La copia locale resta disponibile fino 
 ## 4. Utilizzo
 
 ### Prerequisiti
-- Sessione Retool valida: `retool login` (la sessione scade periodicamente).
 - Credenziali MySQL nel file `.env` (solo lettura di `information_schema`).
+- Una sessione Retool valida, che scade periodicamente. Due modi per fornirla:
+
+| Dove gira | Come si fornisce la sessione |
+|---|---|
+| PC con browser | `retool login` del vecchio CLI `retool-cli`; la sessione resta nel keyring di sistema |
+| Server senza browser (SSH) | Righe `RETOOL_HOST`, `RETOOL_ACCESS_TOKEN`, `RETOOL_XSRF_TOKEN` nel `.env`, generate sul PC con `node sync_retool.js --stampa-credenziali` |
+
+Se la sessione è scaduta, l'estrattore si ferma con codice di uscita 3 e indica cosa aggiornare.
+Il nuovo CLI `@tryretool/cli` (`retool auth login`) non è utilizzabile: il suo token è pensato per le React apps.
 
 ### Comandi
 ```bash

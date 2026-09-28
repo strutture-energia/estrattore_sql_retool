@@ -20,7 +20,7 @@ estrattore.py (Python, orchestratore)
    └─ 4. output/estrazione.json      scrittura atomica
 ```
 
-Il download è in Node perché le credenziali di `retool login` stanno nel keychain di sistema e si leggono
+Il download è in Node perché, sul PC, la sessione di `retool login` sta nel keyring di sistema e si legge
 con i moduli interni di `retool-cli` (Node). L'analisi è in Python per `sqlglot` e `transit-python`.
 
 ## 2. File
@@ -43,11 +43,25 @@ estrattore_sql_retool/
 ## 3. Sincronizzazione con Retool (`sync_retool.js`)
 
 ### 3.1 Autenticazione
-Individua `retool-cli` a partire da `which retool` (`.../bin/retool` → `.../lib/node_modules/retool-cli`) e ne usa:
-- `lib/utils/credentials.getCredentials()` → `{origin, accessToken, xsrf}` dal keychain;
-- `node_modules/axios`, con header `x-xsrf-token` e cookie `accessToken`.
+Le API interne di Retool usano la **sessione web**: cookie `accessToken` + header `x-xsrf-token`.
+`loadCredentials()` cerca la sessione in quest'ordine:
 
-Stessa logica di `analizzatore_retool/scripts/retool_helper.js`.
+1. **Variabili d'ambiente** `RETOOL_HOST`, `RETOOL_ACCESS_TOKEN`, `RETOOL_XSRF_TOKEN`. `estrattore.py` le carica
+   dal `.env` con python-dotenv e il processo Node le eredita. Se ne è presente solo una parte → errore (codice 3).
+   È la modalità per i server senza browser né keyring.
+2. **Keyring del vecchio `retool-cli`** (`retool login`): il pacchetto si cerca in `npm root -g`/`retool-cli` e,
+   in alternativa, a partire da `which retool`. Si usa `lib/utils/credentials.getCredentials()` → `{origin, accessToken, xsrf}`.
+   Non si usa solo `which retool` perché il binario `retool` può appartenere al nuovo `@tryretool/cli`.
+
+`node sync_retool.js --stampa-credenziali` stampa su stdout la sessione del keyring nel formato `.env`,
+per trasferirla su un server.
+
+**Nuovo `@tryretool/cli`**: `retool auth login` (anche con `--device`) fa un login OAuth2 con client `retool-cli`
+e scope per le React apps (`react_apps:write`), salvato in un `credentials.json`. Non è la sessione web usata dagli
+endpoint `/api/pages`, quindi non viene utilizzato.
+
+Le chiamate HTTP usano `fetch` nativo (Node ≥ 18), con `redirect: 'manual'`: un redirect viene trattato come sessione
+non valida (401). Nessuna dipendenza npm.
 
 ### 3.2 API usate (interne, non documentate da Retool)
 
@@ -86,7 +100,7 @@ Tutte le scritture sono **atomiche** (file `.tmp` + `rename`): un'interruzione n
 ### 3.5 Gestione errori
 | Situazione | Comportamento |
 |---|---|
-| Nessuna credenziale / 401 o 403 sulla lista pagine | Esce con codice 3: "esegui `retool login`" |
+| Nessuna credenziale / 401 o 403 sulla lista pagine | Esce con codice 3; il messaggio dipende dalla fonte (`retool login` oppure aggiornare il `.env`) |
 | HTTP 429, 5xx, errori di rete | Fino a 4 tentativi con attesa esponenziale (2 s, 4 s, 8 s) |
 | HTTP 401 durante i download | Si ferma subito (sessione scaduta), codice 3 |
 | HTTP 403 | Errore della singola pagina; dopo 5 consecutivi si ferma (sessione scaduta), codice 3 |
@@ -221,8 +235,8 @@ e costruisce due mappe `nome_minuscolo → (nome_reale, tipo)`.
 | transit-python | 0.8.302 | richiede la patch di `collections` |
 | PyMySQL | 1.2 | |
 | python-dotenv | 1.2 | |
-| Node.js | 24 | |
-| retool-cli | 1.0.29 | installato globalmente (`npm i -g retool-cli`) |
+| Node.js | 24 (minimo 18) | `fetch` e `AbortSignal.timeout` nativi |
+| retool-cli | 1.0.29 | solo sul PC, per `retool login` (`npm i -g retool-cli`); non serve se la sessione è nel `.env` |
 
 ## 10. Punti di estensione
 
