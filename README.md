@@ -10,31 +10,18 @@ Documentazione completa:
 ## Uso
 
 ```bash
+retool login                              # se la sessione è scaduta
 .venv/bin/python estrattore.py            # sync incrementale + estrazione
 .venv/bin/python estrattore.py --full     # riscarica tutte le pagine
 ```
 
 Setup iniziale: `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`,
-poi copia `.env.example` in `.env` e compila le credenziali MySQL. Richiede Node.js ≥ 18.
-
-### Sessione Retool
-
-- **PC con browser**: installa il vecchio CLI (`npm i -g retool-cli`) ed esegui `retool login`.
-  L'estrattore legge la sessione dal keyring di sistema.
-- **Server senza browser** (es. via SSH): metti la sessione nel `.env` del server
-  (`RETOOL_HOST`, `RETOOL_ACCESS_TOKEN`, `RETOOL_XSRF_TOKEN`). Per ottenerla, dal PC:
-  ```bash
-  node sync_retool.js --stampa-credenziali | ssh utente@server 'cat >> percorso/estrattore_sql_retool/.env'
-  ```
-  Quando la sessione scade, l'estrattore esce con codice 3: ripeti il comando dopo un nuovo `retool login` sul PC
-  (e togli le righe RETOOL_* vecchie dal `.env` del server).
-
-Il nuovo CLI `@tryretool/cli` (`retool auth login`) **non** è supportato: il suo token serve per le
-React apps di Retool, non per l'export delle app classiche.
+poi copia `.env.example` in `.env` (servono solo le credenziali MySQL per information_schema).
+Richiede Node.js e `retool-cli` (`npm i -g retool-cli`).
 
 ## Come funziona
 
-1. `sync_retool.js` usa la sessione Retool (`.env` o keyring) e aggiorna `cache/`:
+1. `sync_retool.js` usa le credenziali di `retool login` e aggiorna `cache/`:
    riscarica solo le pagine il cui `updatedAt` è cambiato, elimina quelle non più su Retool,
    salva la Query Library.
 2. Per ogni pagina decodifica `page.data.appState` (formato Transit) e legge i plugin
