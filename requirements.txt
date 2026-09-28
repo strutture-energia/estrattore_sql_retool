@@ -1,0 +1,5 @@
+pymysql>=1.1.0          # driver MySQL (lettura di information_schema)
+python-dotenv>=1.0.1    # caricamento .env
+sqlglot>=25.0.0         # parser SQL per estrarre tabelle/viste/CALL
+transit-python>=0.8.302 # decoder Transit di page.data.appState (vedi monkey-patch in src/transit_decode.py)
+pytest>=8.0
