@@ -82,7 +82,7 @@ def _read_json(path: Path, default):
         return default
 
 
-_EMPTY = {"stored_procedure": [], "viste": [], "tabelle": [], "funzioni": [], "non_trovati": []}
+_EMPTY = {"stored_procedure": [], "viste": [], "tabelle": [], "funzioni": [], "non_trovati": [], "scritture": {}}
 
 
 def _analyze_page(

@@ -17,6 +17,7 @@ Il risultato sono nomi "grezzi" (ancora da classificare contro information_schem
   - procedures: nomi dopo CALL
   - relations:  tabelle o viste (FROM, JOIN, INTO, UPDATE, tableName GUI...)
   - functions:  chiamate a funzione non native per sqlglot (candidate funzioni utente)
+  - writes:     le relazioni SCRITTE, con operazione e colonne (vedi `Refs.writes`)
 """
 
 from __future__ import annotations
@@ -66,6 +67,32 @@ _RE_CALL = re.compile(rf"\bCALL\s+({_QUALIFIED})", re.IGNORECASE)
 _RE_FUNCTION = re.compile(rf"({_IDENT})\s*\(")
 # `ON DUPLICATE KEY UPDATE col = ...`: quell'UPDATE è seguito da una colonna, non da una tabella.
 _RE_ON_DUPLICATE = re.compile(r"\bON\s+DUPLICATE\s+KEY\s+UPDATE\b", re.IGNORECASE)
+# `SELECT ... FOR UPDATE` è un lock, non una scrittura: senza toglierlo la regex di UPDATE
+# prenderebbe per tabella la parola che segue.
+_RE_FOR_UPDATE = re.compile(r"\bFOR\s+UPDATE\b", re.IGNORECASE)
+
+# Scritture nell'estrazione di riserva: le colonne non si ricavano, restano ignote (None).
+_RE_WRITE = [
+    (re.compile(rf"\b(?:INSERT|REPLACE)\s+(?:IGNORE\s+)?(?:INTO\s+)?({_QUALIFIED})", re.IGNORECASE), "I"),
+    (re.compile(rf"\bUPDATE\s+(?:IGNORE\s+)?({_QUALIFIED})", re.IGNORECASE), "U"),
+    (re.compile(rf"\bDELETE\s+FROM\s+({_QUALIFIED})", re.IGNORECASE), "D"),
+    (re.compile(rf"\bTRUNCATE\s+(?:TABLE\s+)?({_QUALIFIED})", re.IGNORECASE), "D"),
+]
+
+# Query GUI: `actionType` -> operazioni. Le colonne vengono da un changeset o da record
+# costruiti a runtime, quindi restano ignote. Il tipo non riconosciuto si tratta come
+# scrittura generica "?": meglio dichiararla che perderla. In modalità GUI Retool fa solo
+# scritture, quindi anche un `actionType` vuoto è una scrittura di tipo sconosciuto.
+GUI_ACTIONS = {
+    "INSERT": ("I",),
+    "BULK_INSERT": ("I",),
+    "UPDATE_BY": ("U",),
+    "BULK_UPDATE_BY_KEY": ("U",),
+    "UPSERT_BY": ("I", "U"),
+    "BULK_UPSERT_BY_KEY": ("I", "U"),
+    "DELETE_BY": ("D",),
+    "BULK_DELETE_BY_KEY": ("D",),
+}
 
 # Nomi che le regex catturano ma non sono oggetti del DB
 _NOT_RELATIONS = {"dual", "select", "values", "set", "where", "lateral"}
@@ -77,11 +104,26 @@ class Refs:
     procedures: set[str] = field(default_factory=set)
     relations: set[str] = field(default_factory=set)
     functions: set[str] = field(default_factory=set)
+    # relazione -> {operazione: colonne}. Operazioni: "I" insert, "I*" insert senza elenco
+    # colonne (riga intera), "U" update, "D" delete/truncate (riga intera, colonne vuote),
+    # "?" scrittura GUI di tipo sconosciuto. Colonne None = scritte ma non ricavabili.
+    writes: dict[str, dict[str, set[str] | None]] = field(default_factory=dict)
+
+    def add_write(self, relation: str, op: str, columns: set[str] | None) -> None:
+        ops = self.writes.setdefault(relation, {})
+        if op not in ops:
+            ops[op] = None if columns is None else set(columns)
+        elif ops[op] is not None:
+            # Una sola query con colonne ignote rende ignote quelle dell'operazione intera.
+            ops[op] = None if columns is None else ops[op] | columns
 
     def update(self, other: "Refs") -> None:
         self.procedures |= other.procedures
         self.relations |= other.relations
         self.functions |= other.functions
+        for rel, ops in other.writes.items():
+            for op, cols in ops.items():
+                self.add_write(rel, op, cols)
 
 
 def _clean_name(raw: str) -> str:
@@ -119,10 +161,20 @@ def _add_relation(refs: Refs, name: str) -> None:
         refs.relations.add(name)
 
 
+def _add_write(refs: Refs, name: str, op: str, columns: set[str] | None) -> None:
+    name = _clean_name(name)
+    if name and not _is_placeholder(name) and name.lower() not in _NOT_RELATIONS:
+        refs.add_write(name, op, columns)
+
+
 def _refs_from_regex(sql: str) -> Refs:
     """Estrazione di riserva: regex su testo senza stringhe né commenti."""
     refs = Refs()
     text = _RE_ON_DUPLICATE.sub(" ", _strip_strings_and_comments(sql))
+    text = _RE_FOR_UPDATE.sub(" ", text)
+    for rx, op in _RE_WRITE:
+        for m in rx.finditer(text):
+            _add_write(refs, m.group(1), op, None)
     for m in _RE_CALL.finditer(text):
         refs.procedures.add(_clean_name(m.group(1)))
     for m in _RE_RELATION.finditer(text):
@@ -130,6 +182,60 @@ def _refs_from_regex(sql: str) -> Refs:
     for m in _RE_FUNCTION.finditer(text):
         refs.functions.add(_clean_name(m.group(1)))
     return refs
+
+
+def _table_name(t: exp.Table) -> str:
+    return f"{t.db}.{t.name}" if t.db else t.name
+
+
+def _writes_from_statement(stmt: exp.Expression, refs: Refs) -> None:
+    """Scritture di un INSERT / UPDATE / DELETE / TRUNCATE analizzato da sqlglot."""
+    if isinstance(stmt, exp.Insert):
+        target = stmt.this
+        if isinstance(target, exp.Schema) and isinstance(target.this, exp.Table):
+            cols = {c.name for c in target.expressions if c.name}
+            _add_write(refs, _table_name(target.this), "I" if cols else "I*", cols)
+            table = target.this
+        elif isinstance(target, exp.Table):
+            _add_write(refs, _table_name(target), "I*", set())
+            table = target
+        else:
+            return
+        conflict = stmt.args.get("conflict")
+        if conflict is not None:
+            # ON DUPLICATE KEY UPDATE: la riga esistente viene aggiornata su queste colonne.
+            cols = {e.this.name for e in conflict.expressions or [] if isinstance(e, exp.EQ) and isinstance(e.this, exp.Column)}
+            _add_write(refs, _table_name(table), "U", cols)
+
+    elif isinstance(stmt, exp.Update):
+        if not isinstance(stmt.this, exp.Table):
+            return
+        # UPDATE a x JOIN b y ... SET x.c = 1, y.d = 2: la colonna va alla tabella del suo alias.
+        tables = [stmt.this] + [j.this for j in stmt.this.args.get("joins") or [] if isinstance(j.this, exp.Table)]
+        by_alias = {}
+        for t in tables:
+            by_alias[(t.alias or t.name).lower()] = t
+            by_alias.setdefault(t.name.lower(), t)
+        cols: dict[str, set[str]] = {}
+        for e in stmt.expressions:
+            if not (isinstance(e, exp.EQ) and isinstance(e.this, exp.Column)):
+                continue
+            t = by_alias.get(e.this.table.lower(), stmt.this) if e.this.table else stmt.this
+            cols.setdefault(_table_name(t), set()).add(e.this.name)
+        for name, c in cols.items():
+            _add_write(refs, name, "U", c)
+
+    elif isinstance(stmt, exp.Delete):
+        # DELETE a FROM a JOIN b ...: cancella solo da `tables`; altrimenti dalla tabella principale.
+        targets = stmt.args.get("tables") or [stmt.this]
+        for t in targets:
+            if isinstance(t, exp.Table):
+                _add_write(refs, _table_name(t), "D", set())
+
+    elif isinstance(stmt, exp.TruncateTable):
+        for t in stmt.expressions:
+            if isinstance(t, exp.Table):
+                _add_write(refs, _table_name(t), "D", set())
 
 
 def _refs_from_statement(stmt: exp.Expression) -> Refs:
@@ -166,6 +272,7 @@ def _refs_from_statement(stmt: exp.Expression) -> Refs:
         if isinstance(fn.this, str) and fn.this:
             refs.functions.add(fn.this)
 
+    _writes_from_statement(stmt, refs)
     return refs
 
 
@@ -206,6 +313,9 @@ def refs_from_template(template: dict) -> Refs:
         table = (template.get("tableName") or "").strip()
         if table and "{{" not in table:
             _add_relation(refs, table)
+            action = template.get("actionType") or ""
+            for op in GUI_ACTIONS.get(action, ("?",)):
+                _add_write(refs, table, op, None)
         return refs
 
     query = template.get("query")

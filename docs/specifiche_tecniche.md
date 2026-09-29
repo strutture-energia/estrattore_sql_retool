@@ -164,7 +164,25 @@ Il testo restante di `exp.Command` può essere un `exp.Literal` oppure una `str`
    - rimozione di `ON DUPLICATE KEY UPDATE` (seguito da colonne, non da tabelle);
    - regex: `(FROM|JOIN|INTO|UPDATE|TABLE) nome` → relazioni, `CALL nome` → procedure, `nome(` → funzioni candidate.
 
-Il risultato è un oggetto `Refs(procedures, relations, functions)` con i nomi grezzi (senza backtick, eventualmente
+### 5.4bis Scritture (`_writes_from_statement`, `GUI_ACTIONS`)
+Oltre ai riferimenti, ogni statement DML produce le scritture in `Refs.writes`
+(`{relazione: {op: set(colonne) | None}}`, regola R8):
+
+| Nodo sqlglot | Scrittura |
+|---|---|
+| `exp.Insert` con `exp.Schema` | `I` con le colonne dello schema; `conflict` (ON DUPLICATE KEY UPDATE) → `U` con le colonne assegnate |
+| `exp.Insert` con `exp.Table` | `I*`, colonne vuote |
+| `exp.Update` | `U`; ogni `EQ` del `SET` va alla tabella del suo qualificatore (alias di `this` o dei `joins`), senza qualificatore a `this` |
+| `exp.Delete` | `D` su `tables` (DELETE multi-tabella) oppure su `this` |
+| `exp.TruncateTable` | `D` |
+
+Nell'estrattore di riserva le regex `_RE_WRITE` (`INSERT/REPLACE INTO`, `UPDATE`, `DELETE FROM`, `TRUNCATE`)
+danno scritture con colonne `None`; prima si tolgono `ON DUPLICATE KEY UPDATE` e `FOR UPDATE`.
+In modalità GUI `GUI_ACTIONS` traduce `actionType`; un tipo sconosciuto o vuoto diventa `?`.
+`Refs.add_write` unisce le colonne; un `None` le assorbe (una query ignota rende ignota l'operazione).
+`DbCatalog.classify` riporta in `scritture` solo tabelle e viste trovate, col nome del DB.
+
+Il risultato è un oggetto `Refs(procedures, relations, functions, writes)` con i nomi grezzi (senza backtick, eventualmente
 qualificati `schema.nome`). I `Refs` di tutte le query di una pagina vengono uniti.
 
 ### 5.5 Statistiche sulla prima esecuzione

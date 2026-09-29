@@ -148,3 +148,73 @@ def test_classification():
     assert out["viste"] == ["vw_gant"]
     assert out["funzioni"] == ["fn_calc"]
     assert out["non_trovati"] == ["altro_db.t", "inesistente", "st_sparita"]
+
+
+# --- Scritture: operazione e colonne ---------------------------------------------------
+
+def test_select_is_not_a_write():
+    refs = refs_from_sql("SELECT * FROM anagrafica a JOIN progetti p ON 1=1 FOR UPDATE")
+    assert refs.relations == {"anagrafica", "progetti"}
+    assert refs.writes == {}
+
+
+def test_insert_update_delete_with_columns():
+    refs = refs_from_sql(
+        "INSERT INTO t (a, b) SELECT a, b FROM s;"
+        "UPDATE anagrafica SET pec = {{ pec }}, email = {{ email }} WHERE id = {{ id }};"
+        "DELETE FROM log WHERE id = 1; TRUNCATE TABLE tmp"
+    )
+    assert refs.writes == {
+        "t": {"I": {"a", "b"}},
+        "anagrafica": {"U": {"pec", "email"}},
+        "log": {"D": set()},
+        "tmp": {"D": set()},
+    }
+    assert "s" not in refs.writes   # letta, non scritta
+
+
+def test_insert_without_columns_and_upsert():
+    refs = refs_from_sql(
+        "INSERT INTO t VALUES (1, 2);"
+        "INSERT INTO r (a, b) VALUES (1, 2) ON DUPLICATE KEY UPDATE b = VALUES(b)"
+    )
+    assert refs.writes == {"t": {"I*": set()}, "r": {"I": {"a", "b"}, "U": {"b"}}}
+
+
+def test_multi_table_update_and_delete_follow_aliases():
+    refs = refs_from_sql(
+        "UPDATE a x JOIN b y ON x.id = y.id SET x.c = 1, y.d = 2, e = 3;"
+        "DELETE a FROM a JOIN b ON a.id = b.id"
+    )
+    assert refs.writes == {"a": {"U": {"c", "e"}, "D": set()}, "b": {"U": {"d"}}}
+
+
+def test_regex_fallback_writes_have_unknown_columns():
+    refs = refs_from_sql("REPLACE INTO t (a) VALUES (1)")   # sqlglot non lo analizza
+    assert refs.writes == {"t": {"I": None}}
+    sql = "IF @x IS NULL THEN\n UPDATE progetti SET a = 1;\n SELECT * FROM altra FOR UPDATE;\nEND IF"
+    assert refs_from_sql(sql).writes == {"progetti": {"U": None}}
+
+
+def test_unknown_columns_absorb_known_ones():
+    a, b = refs_from_sql("UPDATE t SET x = 1"), refs_from_sql("IF 1 THEN UPDATE t SET y = 1; END IF")
+    a.update(b)
+    assert a.writes == {"t": {"U": None}}
+
+
+def test_gui_actions_are_writes_with_unknown_columns():
+    upsert = refs_from_template({"editorMode": "gui", "tableName": "t", "actionType": "BULK_UPSERT_BY_KEY"})
+    assert upsert.writes == {"t": {"I": None, "U": None}}
+    blank = refs_from_template({"editorMode": "gui", "tableName": "t", "actionType": ""})
+    assert blank.writes == {"t": {"?": None}}
+
+
+def test_classification_of_writes():
+    catalog = DbCatalog("ecodomus", tables={"Anagrafica": "BASE TABLE", "vw_x": "VIEW"}, routines={})
+    refs = refs_from_sql(
+        "UPDATE anagrafica SET pec = 1; UPDATE ecodomus.vw_x SET a = 1;"
+        "INSERT INTO sparita (a) VALUES (1); SELECT * FROM anagrafica"
+    )
+    out = catalog.classify(refs)
+    assert out["scritture"] == {"Anagrafica": {"U": ["pec"]}, "vw_x": {"U": ["a"]}}
+    assert out["non_trovati"] == ["sparita"]

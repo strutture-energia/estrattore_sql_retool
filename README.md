@@ -64,6 +64,10 @@ compaiono come voci a sé con i propri oggetti.
   tabelle temporanee, nomi parzialmente dinamici tipo `tabella_{{ x }}`).
 - `errore`: presente solo se la pagina non è stata scaricata o decodificata.
 
+- `scritture`: per le tabelle e viste **scritte**, `{tabella: {operazione: [colonne] | null}}` con
+  `I`, `I*`, `U`, `D`, `?`. Distingue chi scrive da chi legge soltanto; `null` = colonne non ricavabili
+  (query GUI, estrazione di riserva). Vedi R8 nelle specifiche funzionali.
+
 ## Limiti noti
 
 - Solo riferimenti diretti: gli oggetti usati *dentro* una SP o una vista non vengono esplosi.

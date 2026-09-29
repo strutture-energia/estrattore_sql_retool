@@ -88,6 +88,27 @@ Non vengono riportati:
 Ogni esecuzione controlla su Retool quali pagine sono cambiate e riscarica solo quelle. Le pagine cancellate
 su Retool spariscono dalla copia locale. La copia locale resta disponibile fino all'esecuzione successiva.
 
+### R8 — Scritture: operazione e colonne
+Per ogni tabella o vista **scritta** si riporta in `scritture` l'operazione e, quando si ricava, le colonne.
+Serve a distinguere chi scrive da chi legge soltanto: `tabelle` e `viste` elencano entrambi.
+
+| Sigla | Da | Colonne |
+|---|---|---|
+| `I` | `INSERT INTO t (a, b)`, `REPLACE`, query GUI di inserimento | quelle elencate |
+| `I*` | `INSERT INTO t VALUES (...)`, senza elenco colonne | riga intera: `[]` |
+| `U` | `UPDATE ... SET`, `ON DUPLICATE KEY UPDATE`, query GUI di aggiornamento | quelle dopo `SET` |
+| `D` | `DELETE`, `TRUNCATE` | riga intera: `[]` |
+| `?` | query GUI con `actionType` sconosciuto o vuoto | `null` |
+
+- Le colonne sono `null` quando **non si possono ricavare**: query GUI (il changeset è costruito a runtime)
+  ed estrazione di riserva con regex. `null` vuol dire «scritte, ma non so quali», non «nessuna».
+- In modalità GUI Retool fa solo scritture: `INSERT`/`BULK_INSERT` → `I`, `UPDATE_BY`/`BULK_UPDATE_BY_KEY` → `U`,
+  `UPSERT_BY`/`BULK_UPSERT_BY_KEY` → `I` e `U`, `DELETE_BY`/`BULK_DELETE_BY_KEY` → `D`.
+- `UPDATE a x JOIN b y SET x.c = 1, y.d = 2`: ogni colonna va alla tabella del suo alias; `DELETE a FROM a JOIN b`
+  scrive solo `a`.
+- `SELECT ... FOR UPDATE` è un lock, non una scrittura.
+- Solo oggetti trovati nel DB, col nome del DB; le scritture su nomi inesistenti restano in `non_trovati`.
+
 ## 4. Utilizzo
 
 ### Prerequisiti
@@ -129,7 +150,8 @@ File: `output/estrazione.json` (sovrascritto a ogni esecuzione).
       "viste": [],
       "tabelle": [],
       "funzioni": [],
-      "non_trovati": []
+      "non_trovati": [],
+      "scritture": {}
     }
   ],
   "query_library": [
@@ -142,6 +164,10 @@ File: `output/estrazione.json` (sovrascritto a ogni esecuzione).
       "tabelle": ["anagrafica", "anagrafica_persona_giuridica"],
       "funzioni": [],
       "non_trovati": [],
+      "scritture": {
+        "anagrafica": {"U": ["codice_fiscale"]},
+        "anagrafica_persona_giuridica": {"I": null, "U": null}
+      },
       "usata_da": [
         {"nome": "Anagrafiche di progetto", "cartella": "root", "uuid": "…"},
         {"nome": "assegna ruoli", "cartella": "Trattativa", "uuid": "…"},
@@ -171,6 +197,7 @@ Voce di una **pagina** (`pagine[]`):
 | `query_library` | Nomi delle query della Query Library importate (versione "latest"), in ordine alfabetico |
 | `stored_procedure`, `viste`, `tabelle`, `funzioni` | Oggetti del DB usati direttamente dalle query **proprie** della pagina, in ordine alfabetico |
 | `non_trovati` | Nomi usati nelle query che nel DB non esistono |
+| `scritture` | `{tabella: {operazione: [colonne] \| null}}` per le tabelle e viste scritte (R8) |
 | `errore` | Presente solo se la pagina non è stata scaricata o letta; in caso di download fallito i dati vengono dalla copia precedente |
 
 Voce di una **query della Query Library** (`query_library[]`):
@@ -180,7 +207,7 @@ Voce di una **query della Query Library** (`query_library[]`):
 | `nome` | Nome della query nella Library |
 | `uuid` | Identificativo della query nella Library |
 | `aggiornata_il` | Ultima modifica della query nella Library |
-| `stored_procedure`, `viste`, `tabelle`, `funzioni`, `non_trovati` | Come per le pagine, riferiti al corpo della query |
+| `stored_procedure`, `viste`, `tabelle`, `funzioni`, `non_trovati`, `scritture` | Come per le pagine, riferiti al corpo della query |
 | `usata_da` | Pagine che la importano in versione "latest": `{nome, cartella, uuid}`; vuoto se nessuna la usa |
 
 Pagine e query della Library sono ordinate per nome.

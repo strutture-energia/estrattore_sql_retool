@@ -8,6 +8,10 @@ Regole:
   - x(...)            -> funzioni solo se x è una FUNCTION; gli altri nomi sono funzioni
                          native di MySQL e vengono scartati
 Il confronto è case-insensitive; in output si usa il nome come è scritto nel DB.
+
+`scritture` riporta, per le sole tabelle e viste trovate nel DB, le operazioni di scrittura
+e le colonne scritte (null = non ricavabili). Le scritture su nomi non trovati sono già
+segnalate in non_trovati.
 """
 
 from __future__ import annotations
@@ -75,7 +79,7 @@ class DbCatalog:
             name = obj
         return name.lower()
 
-    def classify(self, refs: Refs) -> dict[str, list[str]]:
+    def classify(self, refs: Refs) -> dict:
         out: dict[str, set[str]] = {
             "stored_procedure": set(),
             "viste": set(),
@@ -112,7 +116,23 @@ class DbCatalog:
             seen.setdefault(n.lower(), n)
         out["non_trovati"] = set(seen.values())
 
-        return {k: sorted(v, key=str.lower) for k, v in out.items()}
+        writes: dict[str, dict[str, set[str] | None]] = {}
+        for name, ops in refs.writes.items():
+            key = self._local_key(name)
+            hit = self._tables.get(key) if key else None
+            if not hit:
+                continue
+            merged = Refs(writes={hit[0]: writes.get(hit[0], {})})
+            for op, cols in ops.items():
+                merged.add_write(hit[0], op, cols)
+            writes[hit[0]] = merged.writes[hit[0]]
+
+        result: dict = {k: sorted(v, key=str.lower) for k, v in out.items()}
+        result["scritture"] = {
+            tab: {op: (None if cols is None else sorted(cols, key=str.lower)) for op, cols in sorted(ops.items())}
+            for tab, ops in sorted(writes.items(), key=lambda kv: kv[0].lower())
+        }
+        return result
 
 
 def open_connection(host: str, port: int, user: str, password: str, database: str):
