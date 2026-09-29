@@ -9,7 +9,7 @@ Sapere, per **ogni app e ogni modulo Retool**, quali oggetti del database MySQL 
 - tabelle
 - funzioni
 
-Il risultato è un **unico file JSON** con tutte le pagine Retool, utile per:
+Il risultato è un **unico file JSON** con tutte le pagine Retool e tutte le query della Query Library, utile per:
 
 - capire l'impatto di una modifica o cancellazione di una SP, vista o tabella;
 - trovare oggetti del DB non più usati da nessuna app;
@@ -42,13 +42,25 @@ Tutte le pagine presenti su Retool compaiono nel JSON, comprese quelle senza que
 Per le query costruite con l'editor visuale conta la **tabella selezionata** nell'editor. L'eventuale testo SQL
 rimasto nella query (da quando era in modalità SQL) viene ignorato, perché Retool non lo esegue.
 
-### R4 — Query della Query Library
-Se un'app importa una query dalla Query Library in versione "latest", si analizza **la versione attuale della
-Library**, perché è quella che Retool esegue. Se l'app è legata a una versione specifica, si analizza la copia
-salvata nell'app.
+### R4 — Query della Query Library: componenti a sé
+Una query della Query Library non è un semplice wrapper: ha una sua logica (più UPDATE, CALL, transazioni…).
+Come i moduli (R1), è un **componente a sé**:
 
-> Esempio: in `upload_documenti` la copia nell'app chiama ancora `usp_aggiorna_upload_documento`,
-> ma la Library oggi chiama `st_update_documento_upload`: nel JSON compare la seconda.
+- ogni query della Library ha **una propria voce** nella sezione `query_library` del JSON, con i suoi oggetti
+  del DB e l'elenco delle pagine che la importano (`usata_da`); compaiono tutte, anche quelle non usate;
+- la pagina che la importa riporta solo il **nome** della query in `query_library`; gli oggetti della query
+  **non** finiscono negli array della pagina;
+- si analizza **la versione attuale della Library**, perché è quella che Retool esegue (versione "latest");
+- il nome è quello della query nella Library, non quello che ha nell'app
+  (es. in `upload_documenti` il plugin `insertDocumento` → `st_update_documento_upload`).
+
+Eccezioni, trattate come **query propria della pagina** (oggetti negli array della pagina, usando la copia
+salvata nell'app):
+- l'app è legata a una **versione fissa** della query (non "latest"): esegue quella copia, non la Library attuale;
+- la query della Library **non è visibile** all'utente con cui si scarica (query privata di un altro utente).
+
+> Per sapere quali pagine toccano un oggetto X servono due passaggi: le pagine che hanno X nei propri array,
+> più le pagine in `usata_da` delle query della Library che hanno X nei loro array.
 
 ### R5 — Classificazione contro il database
 Ogni nome trovato nelle query viene confrontato con il database configurato:
@@ -104,6 +116,7 @@ File: `output/estrazione.json` (sovrascritto a ogni esecuzione).
   "generato_il": "2026-09-28T15:04:25",
   "database": "strutture_energia_it_retool_produzione",
   "totale_pagine": 746,
+  "totale_query_library": 220,
   "pagine": [
     {
       "nome": "modulo_elenco_messaggi",
@@ -111,11 +124,29 @@ File: `output/estrazione.json` (sovrascritto a ogni esecuzione).
       "uuid": "cf1c5146-fdc8-11f0-823d-7fe65ea66425",
       "tipo": "modulo",
       "aggiornata_il": "2026-06-05T10:45:51.615Z",
-      "stored_procedure": ["st_get_elenco_conversazioni", "st_update_stato_lettura_messaggi"],
+      "query_library": ["st_update_stato_lettura_messaggi"],
+      "stored_procedure": ["st_get_elenco_conversazioni"],
       "viste": [],
       "tabelle": [],
       "funzioni": [],
       "non_trovati": []
+    }
+  ],
+  "query_library": [
+    {
+      "nome": "anagrafica_persona_giuridica_update",
+      "uuid": "4e94813c-fb77-48b5-bab3-cc3f467f412a",
+      "aggiornata_il": "2026-07-28T07:49:12.248Z",
+      "stored_procedure": ["st_upsert_recapito"],
+      "viste": [],
+      "tabelle": ["anagrafica", "anagrafica_persona_giuridica"],
+      "funzioni": [],
+      "non_trovati": [],
+      "usata_da": [
+        {"nome": "Anagrafiche di progetto", "cartella": "root", "uuid": "…"},
+        {"nome": "assegna ruoli", "cartella": "Trattativa", "uuid": "…"},
+        {"nome": "edit anagrafica base pg", "cartella": "Sinergia", "uuid": "…"}
+      ]
     }
   ]
 }
@@ -126,16 +157,33 @@ File: `output/estrazione.json` (sovrascritto a ogni esecuzione).
 | `generato_il` | Data e ora dell'estrazione |
 | `database` | Schema MySQL usato per la classificazione |
 | `totale_pagine` | Numero di pagine nel file (= pagine presenti su Retool) |
+| `totale_query_library` | Numero di query della Query Library visibili |
+
+Voce di una **pagina** (`pagine[]`):
+
+| Campo | Significato |
+|---|---|
 | `nome` | Nome della pagina su Retool |
 | `cartella` | Cartella Retool (distingue pagine con lo stesso nome) |
 | `uuid` | Identificativo univoco della pagina (coincide con quello usato in `menu` / `dizionario_moduli`) |
 | `tipo` | `app` oppure `modulo` |
 | `aggiornata_il` | Ultima modifica della pagina su Retool |
-| `stored_procedure`, `viste`, `tabelle`, `funzioni` | Oggetti del DB usati direttamente, in ordine alfabetico |
+| `query_library` | Nomi delle query della Query Library importate (versione "latest"), in ordine alfabetico |
+| `stored_procedure`, `viste`, `tabelle`, `funzioni` | Oggetti del DB usati direttamente dalle query **proprie** della pagina, in ordine alfabetico |
 | `non_trovati` | Nomi usati nelle query che nel DB non esistono |
 | `errore` | Presente solo se la pagina non è stata scaricata o letta; in caso di download fallito i dati vengono dalla copia precedente |
 
-Le pagine sono ordinate per nome.
+Voce di una **query della Query Library** (`query_library[]`):
+
+| Campo | Significato |
+|---|---|
+| `nome` | Nome della query nella Library |
+| `uuid` | Identificativo della query nella Library |
+| `aggiornata_il` | Ultima modifica della query nella Library |
+| `stored_procedure`, `viste`, `tabelle`, `funzioni`, `non_trovati` | Come per le pagine, riferiti al corpo della query |
+| `usata_da` | Pagine che la importano in versione "latest": `{nome, cartella, uuid}`; vuoto se nessuna la usa |
+
+Pagine e query della Library sono ordinate per nome.
 
 ### Come leggere `non_trovati`
 Un nome in `non_trovati` può essere:
@@ -159,14 +207,16 @@ Un nome in `non_trovati` può essere:
   Retool da cui arriva. Distribuzione attuale: MySqlDB 3.335 query, "MySqlDB - unsafe mode" 219,
   "MySql - Stage" 105, `retool_db` 32, `onboarding_db` 4.
 
-## 8. Risultati della prima esecuzione (28/09/2026)
+## 8. Risultati (29/09/2026)
 
 | | |
 |---|---|
 | Pagine | 746 (655 app, 91 moduli) |
-| Pagine con almeno un oggetto del DB | 488 |
-| Stored procedure distinte usate | 126 |
-| Viste distinte usate | 63 |
-| Tabelle distinte usate | 136 |
-| Nomi distinti non trovati nel DB | 84 |
+| Pagine con almeno un oggetto del DB nelle proprie query | 471 |
+| Pagine che importano almeno una query della Library | 81 |
+| Pagine con oggetti propri o query della Library | 488 |
+| Query della Library | 220 (152 importate da almeno una pagina, max 9 pagine per query) |
+| Stored procedure distinte (pagine / Library / totale) | 34 / 118 / 141 |
+| Viste distinte (pagine / Library / totale) | 44 / 43 / 74 |
+| Tabelle distinte (pagine / Library / totale) | 134 / 30 / 136 |
 | Pagine con errore | 0 |

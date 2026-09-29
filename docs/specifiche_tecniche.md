@@ -14,10 +14,14 @@ estrattore.py (Python, orchestratore)
    │
    ├─ 3. per ogni pagina in cache/pages.json:
    │      decode_transit_string()    page.data.appState (Transit) → dict
-   │      refs_from_app_state()      plugin SQL → nomi grezzi (procedure / relazioni / funzioni)
+   │      refs_from_app_state()      plugin SQL → oggetti propri + uuid delle query Library importate
    │      DbCatalog.classify()       nomi grezzi → stored_procedure / viste / tabelle / funzioni / non_trovati
    │
-   └─ 4. output/estrazione.json      scrittura atomica
+   ├─ 4. per ogni query in cache/query_library.json:
+   │      refs_from_template()       corpo della query → nomi grezzi → DbCatalog.classify()
+   │      usata_da                   pagine che l'hanno importata al passo 3
+   │
+   └─ 5. output/estrazione.json      scrittura atomica
 ```
 
 Il download è in Node perché le credenziali di `retool login` stanno nel keychain di sistema e si leggono
@@ -55,7 +59,7 @@ Stessa logica di `analizzatore_retool/scripts/retool_helper.js`.
 |---|---|
 | `GET /api/pages?mobileAppsOnly=false` | Elenco pagine (`uuid, name, folderId, updatedAt, isGlobalWidget…`) e cartelle (`folders[]`) |
 | `POST /api/pages/uuids/{uuid}/export` | JSON completo di una pagina |
-| `GET /api/playground` | Query Library: `{orgQueries, userQueries}` con `uuid, name, saveId, template` |
+| `GET /api/playground` | Query Library: `{orgQueries, userQueries}` con `uuid, name, saveId, updatedAt, template` |
 
 `isGlobalWidget = true` identifica un **modulo**.
 
@@ -67,7 +71,7 @@ Stessa logica di `analizzatore_retool/scripts/retool_helper.js`.
 | `cache/pages/<uuid>.json` | Export di ogni pagina, così come restituito da Retool |
 | `cache/manifest.json` | `{uuid: updatedAt}` delle pagine scaricate con successo |
 | `cache/errors.json` | `{uuid: messaggio}` delle pagine il cui download è fallito nell'ultima esecuzione |
-| `cache/query_library.json` | `{uuid: {nome, saveId, template: {editorMode, query, tableName, actionType}}}` |
+| `cache/query_library.json` | `{uuid: {nome, saveId, aggiornata_il, template: {editorMode, query, tableName, actionType}}}` |
 
 Il file della pagina usa l'uuid e non il nome: su Retool esistono 12 nomi duplicati in cartelle diverse e nomi con
 caratteri non validi nei file (`/`, spazi iniziali).
@@ -91,7 +95,7 @@ Tutte le scritture sono **atomiche** (file `.tmp` + `rename`): un'interruzione n
 | HTTP 401 durante i download | Si ferma subito (sessione scaduta), codice 3 |
 | HTTP 403 | Errore della singola pagina; dopo 5 consecutivi si ferma (sessione scaduta), codice 3 |
 | Risposta che non è un export (manca `page`) | Errore della singola pagina |
-| Query Library non leggibile | Non bloccante: elimina il `query_library.json` vecchio, si usano le copie nelle app |
+| Query Library non leggibile | Non bloccante: elimina il `query_library.json` vecchio; le query importate vengono trattate come query proprie delle pagine (copia salvata) e la sezione `query_library` dell'output resta vuota |
 
 Una pagina in errore mantiene nel manifest il vecchio `updatedAt`, quindi viene ritentata all'esecuzione successiva.
 
@@ -122,9 +126,17 @@ La chiave `modules` dell'export (contenuto dei moduli incorporati) **non viene l
 ### 5.1 Selezione dei plugin
 Si considerano solo i plugin di `appState.plugins` con `subtype ∈ {SqlQueryUnified, SqlQuery}`.
 
-### 5.2 Scelta del template (`_effective_template`)
-Se `template.isImported` è vero, `playgroundQuerySaveId ∈ {"latest", "", None}` e `playgroundQueryUuid` è in
-`query_library.json`, si usa il template della Library. Altrimenti il template dell'app.
+### 5.2 Query importate dalla Library (`library_uuid`, `refs_from_app_state`)
+Un plugin è un **riferimento alla Library** se `template.isImported` è vero,
+`playgroundQuerySaveId ∈ {"latest", "", None}` e `playgroundQueryUuid` è in `query_library.json`.
+In quel caso `refs_from_app_state()` aggiunge l'uuid a `PageRefs.library_uuids` e **non** analizza il testo
+(né la copia nell'app né la Library): gli oggetti della query vanno solo nella sua voce di `query_library`.
+
+In tutti gli altri casi (query non importata, versione fissata, query della Library non visibile) si analizza il
+template dell'app e gli oggetti finiscono in `PageRefs.own`.
+
+`refs_from_template()` è la stessa funzione usata sia per i plugin delle pagine sia per il corpo delle query
+della Library: GUI e SQL vengono trattati allo stesso modo.
 
 ### 5.3 Modalità GUI
 `template.editorMode == "gui"` → l'unico riferimento è `template.tableName` (tipo relazione), se non vuoto e
@@ -190,8 +202,13 @@ e costruisce due mappe `nome_minuscolo → (nome_reale, tipo)`.
    - `appState` assente o non decodificabile in dict → `errore`;
    - eccezione durante l'analisi → `errore` con il messaggio (la pagina non blocca le altre);
    - uuid in `errors.json` ma export presente → analisi della copia precedente + `errore` esplicativo.
-5. Scrive il JSON (UTF-8, `ensure_ascii=False`, indentato) su file `.tmp` e poi `replace` atomico.
-6. Riepilogo su stderr: pagine totali, con oggetti, con errori.
+
+   Ogni pagina restituisce anche gli uuid delle query della Library importate; vengono raccolti in un indice
+   `uuid → [pagine]`.
+5. `_analyze_library()`: per ogni query di `query_library.json` classifica gli oggetti del suo template e aggiunge
+   `usata_da` dall'indice del passo 4. Nella voce della pagina, `query_library` contiene i **nomi** delle query.
+6. Scrive il JSON (UTF-8, `ensure_ascii=False`, indentato) su file `.tmp` e poi `replace` atomico.
+7. Riepilogo su stderr: pagine totali, con oggetti, con errori; query della Library totali e usate.
 
 ## 8. Test
 
@@ -204,7 +221,8 @@ e costruisce due mappe `nome_minuscolo → (nome_reale, tipo)`.
 | Placeholder | espressioni JS con graffe singole |
 | DML | DELETE/UPDATE con subquery, sentinel `'#'` |
 | Riserva | query sintatticamente errata, blocchi `IF … THEN` |
-| Template | modalità GUI con SQL residuo, Query Library `latest` vs versione fissata |
+| Template | modalità GUI con SQL residuo |
+| Query Library | import `latest` = solo riferimento (nessun oggetto nella pagina); versione fissata o query non visibile = query propria; corpo con transazione, UPDATE, CALL e codice commentato |
 | Pagina | solo subtype SQL, plugin non SQL ignorati |
 | Classificazione | procedure, tabelle, viste, funzioni, schema diverso, inesistenti, maiuscole |
 
@@ -238,7 +256,7 @@ e costruisce due mappe `nome_minuscolo → (nome_reale, tipo)`.
 | Aspetto | analizzatore_retool | estrattore_sql_retool |
 |---|---|---|
 | Query GUI | ignorate, o lette dal testo residuo | lette da `tableName` |
-| Query Library | copia nell'app | versione `latest` della Library |
+| Query Library | copia nell'app, oggetti mescolati a quelli dell'app | voce a sé con `usata_da`, versione `latest` |
 | Viste vs tabelle | non distinte (`information_schema.columns`) | distinte (`TABLES.TABLE_TYPE`) |
 | CALL multiple | solo la prima | tutte |
 | CTE, `INTO @var` | contate come tabelle | escluse |

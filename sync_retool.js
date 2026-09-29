@@ -219,6 +219,7 @@ async function main() {
       out[q.uuid] = {
         nome: q.name,
         saveId: q.saveId,
+        aggiornata_il: q.updatedAt,
         template: {
           editorMode: t.editorMode,
           query: t.query,

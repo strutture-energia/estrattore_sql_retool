@@ -3,7 +3,9 @@
 Estrattore SQL Retool.
 
 Per ogni app e modulo Retool (tutti, nessuno escluso) produce l'elenco di stored procedure,
-viste, tabelle e funzioni MySQL usate direttamente dalle sue query, in un unico file JSON.
+viste, tabelle e funzioni MySQL usate direttamente dalle sue query, più le query della
+Query Library che importa. Ogni query della Library ha una voce a sé con i propri oggetti
+e le pagine che la usano (`usata_da`). Tutto in un unico file JSON.
 
 Flusso:
   1. `node sync_retool.js cache/` aggiorna la cache locale (download incrementale via updatedAt)
@@ -32,7 +34,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from src.db_catalog import DbCatalog, open_connection
-from src.sql_extract import refs_from_app_state
+from src.sql_extract import refs_from_app_state, refs_from_template
 from src.transit_decode import decode_transit_string
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -80,7 +82,13 @@ def _read_json(path: Path, default):
         return default
 
 
-def _analyze_page(page: dict, library: dict, catalog: DbCatalog, download_error: str | None) -> dict:
+_EMPTY = {"stored_procedure": [], "viste": [], "tabelle": [], "funzioni": [], "non_trovati": []}
+
+
+def _analyze_page(
+    page: dict, library: dict, catalog: DbCatalog, download_error: str | None,
+) -> tuple[dict, set[str]]:
+    """Restituisce la voce della pagina e gli uuid delle query della Library che importa."""
     entry = {
         "nome": page["nome"],
         "cartella": page["cartella"],
@@ -88,29 +96,47 @@ def _analyze_page(page: dict, library: dict, catalog: DbCatalog, download_error:
         "tipo": page["tipo"],
         "aggiornata_il": page["aggiornata_il"],
     }
-    empty = {"stored_procedure": [], "viste": [], "tabelle": [], "funzioni": [], "non_trovati": []}
+
+    def _error(msg: str) -> tuple[dict, set[str]]:
+        return {**entry, "query_library": [], **_EMPTY, "errore": msg}, set()
 
     export_file = CACHE_DIR / "pages" / f"{page['uuid']}.json"
     if not export_file.exists():
-        return {**entry, **empty, "errore": download_error or "export non presente in cache"}
+        return _error(download_error or "export non presente in cache")
 
     try:
         export = json.loads(export_file.read_text(encoding="utf-8"))
         app_state_raw = ((export.get("page") or {}).get("data") or {}).get("appState")
         if not isinstance(app_state_raw, str):
-            return {**entry, **empty, "errore": "page.data.appState assente (formato pagina non supportato)"}
+            return _error("page.data.appState assente (formato pagina non supportato)")
         app_state = decode_transit_string(app_state_raw)
         if not isinstance(app_state, dict):
-            return {**entry, **empty, "errore": "appState decodificato non è un oggetto"}
-        result = {**entry, **catalog.classify(refs_from_app_state(app_state, library))}
+            return _error("appState decodificato non è un oggetto")
+        page_refs = refs_from_app_state(app_state, library)
     except Exception as e:  # una pagina malformata non deve fermare le altre 700
         log.exception("[%s] analisi fallita", page["nome"])
-        return {**entry, **empty, "errore": f"analisi fallita: {e}"}
+        return _error(f"analisi fallita: {e}")
 
+    lib_names = sorted({library[u]["nome"] for u in page_refs.library_uuids}, key=str.lower)
+    result = {**entry, "query_library": lib_names, **catalog.classify(page_refs.own)}
     if download_error:
         # Il download di questa esecuzione è fallito: i dati vengono dalla copia precedente.
         result["errore"] = f"{download_error} (dati della copia in cache)"
-    return result
+    return result, page_refs.library_uuids
+
+
+def _analyze_library(library: dict, catalog: DbCatalog, users: dict[str, list[dict]]) -> list[dict]:
+    """Una voce per ogni query della Query Library, con gli oggetti del DB e le pagine che la importano."""
+    out = []
+    for uuid, q in library.items():
+        out.append({
+            "nome": q["nome"],
+            "uuid": uuid,
+            "aggiornata_il": q.get("aggiornata_il"),
+            **catalog.classify(refs_from_template(q.get("template") or {})),
+            "usata_da": sorted(users.get(uuid, []), key=lambda p: (p["nome"].strip().lower(), p["cartella"].lower())),
+        })
+    return sorted(out, key=lambda q: (q["nome"].lower(), q["uuid"]))
 
 
 def main() -> int:
@@ -131,16 +157,23 @@ def main() -> int:
     errors = _read_json(CACHE_DIR / "errors.json", {})
     library = _read_json(CACHE_DIR / "query_library.json", {})
 
-    results = [
-        _analyze_page(p, library, catalog, errors.get(p["uuid"]))
-        for p in sorted(pages, key=lambda p: (p["nome"].strip().lower(), p["cartella"].lower()))
-    ]
+    results = []
+    users: dict[str, list[dict]] = {}  # uuid query Library -> pagine che la importano
+    for p in sorted(pages, key=lambda p: (p["nome"].strip().lower(), p["cartella"].lower())):
+        entry, lib_uuids = _analyze_page(p, library, catalog, errors.get(p["uuid"]))
+        results.append(entry)
+        for u in lib_uuids:
+            users.setdefault(u, []).append({"nome": p["nome"], "cartella": p["cartella"], "uuid": p["uuid"]})
+
+    library_entries = _analyze_library(library, catalog, users)
 
     output = {
         "generato_il": datetime.now().isoformat(timespec="seconds"),
         "database": mysql_cfg["database"],
         "totale_pagine": len(results),
+        "totale_query_library": len(library_entries),
         "pagine": results,
+        "query_library": library_entries,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     tmp = args.output.with_suffix(args.output.suffix + ".tmp")
@@ -149,7 +182,9 @@ def main() -> int:
 
     n_err = sum(1 for r in results if "errore" in r)
     n_sql = sum(1 for r in results if any(r[k] for k in ("stored_procedure", "viste", "tabelle", "funzioni")))
+    n_lib_used = sum(1 for q in library_entries if q["usata_da"])
     log.info("Pagine: %d (%d con oggetti DB, %d con errori) -> %s", len(results), n_sql, n_err, args.output)
+    log.info("Query Library: %d (%d importate da almeno una pagina)", len(library_entries), n_lib_used)
     return 0
 
 

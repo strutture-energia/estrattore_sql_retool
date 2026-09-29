@@ -78,18 +78,47 @@ def test_gui_mode_uses_table_name_not_stale_query():
     assert refs.relations == {"dizionario_documenti"}
 
 
-def test_imported_latest_uses_query_library():
-    tpl = {
-        "editorMode": "sql",
-        "isImported": True,
-        "playgroundQueryUuid": "u1",
-        "playgroundQuerySaveId": "latest",
-        "query": "call st_vecchia()",
-    }
-    library = {"u1": {"template": {"editorMode": "sql", "query": "call st_nuova({{ x }})"}}}
-    assert refs_from_template(tpl, library).procedures == {"st_nuova"}
-    # Versione fissata: si usa la copia nell'app
-    assert refs_from_template({**tpl, "playgroundQuerySaveId": "123"}, library).procedures == {"st_vecchia"}
+def _plugin(template):
+    return {"subtype": "SqlQueryUnified", "template": template}
+
+
+def test_imported_latest_is_library_reference_not_own_objects():
+    library = {"u1": {"nome": "lib_q", "template": {"editorMode": "sql", "query": "call st_nuova({{ x }})"}}}
+    app_state = {"plugins": {
+        "imp": _plugin({"isImported": True, "playgroundQueryUuid": "u1",
+                        "playgroundQuerySaveId": "latest", "query": "call st_vecchia()"}),
+        "own": _plugin({"editorMode": "sql", "query": "SELECT * FROM propria"}),
+    }}
+    page = refs_from_app_state(app_state, library)
+    assert page.library_uuids == {"u1"}
+    assert page.own.procedures == set()          # né la copia né la Library finiscono nella pagina
+    assert page.own.relations == {"propria"}
+    assert refs_from_template(library["u1"]["template"]).procedures == {"st_nuova"}
+
+
+def test_imported_pinned_or_unknown_counts_as_own_query():
+    library = {"u1": {"nome": "lib_q", "template": {"query": "call st_nuova()"}}}
+    pinned = _plugin({"isImported": True, "playgroundQueryUuid": "u1",
+                      "playgroundQuerySaveId": "123", "query": "call st_fissata()"})
+    unknown = _plugin({"isImported": True, "playgroundQueryUuid": "privata-altrui",
+                       "playgroundQuerySaveId": "latest", "query": "call st_privata()"})
+    page = refs_from_app_state({"plugins": {"a": pinned, "b": unknown}}, library)
+    assert page.library_uuids == set()
+    assert page.own.procedures == {"st_fissata", "st_privata"}
+
+
+def test_library_query_with_internal_logic():
+    sql = """START TRANSACTION;
+UPDATE anagrafica SET codice_fiscale = COALESCE(NULLIF({{ codice_fiscale }}, '#'), codice_fiscale)
+WHERE id_anagrafica = {{ id_anagrafica }};
+CALL st_upsert_recapito({{ id_anagrafica }}, {{ id_email }}, 'email', {{ email }}, @return_id_email);
+/*
+CALL st_upsert_indirizzo([ id_anagrafica ], 'sede legale', @return_id_indirizzo);
+*/
+COMMIT;"""
+    refs = refs_from_template({"editorMode": "sql", "query": sql})
+    assert refs.procedures == {"st_upsert_recapito"}
+    assert refs.relations == {"anagrafica"}
 
 
 def test_only_own_plugins_and_sql_subtypes():
@@ -100,7 +129,7 @@ def test_only_own_plugins_and_sql_subtypes():
             "mod": {"subtype": "GlobalWidget", "template": {}},
         }
     }
-    assert refs_from_app_state(app_state).relations == {"a"}
+    assert refs_from_app_state(app_state).own.relations == {"a"}
 
 
 def test_classification():

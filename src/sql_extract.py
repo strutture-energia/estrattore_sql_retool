@@ -6,7 +6,9 @@ Una query SQL in Retool è un plugin con `subtype` in SQL_SUBTYPES. Dentro `temp
   - editorMode "gui": la tabella è in `tableName` (+ `actionType`), `query` va ignorato
     perché può contenere testo residuo di quando la query era in modalità SQL;
   - isImported: query della Query Library. Con `playgroundQuerySaveId == "latest"` Retool
-    esegue l'ultima versione della Library, quindi usiamo quella invece della copia nell'app.
+    esegue l'ultima versione della Library: la query è un componente a sé (come un modulo),
+    viene registrata come riferimento e analizzata una sola volta, fuori dalla pagina.
+    Con una versione fissata la copia salvata nella pagina conta come query propria.
 
 Si analizza solo `page.plugins` della pagina stessa: le query dei moduli incorporati
 appartengono al modulo, che viene analizzato come pagina a sé.
@@ -182,21 +184,23 @@ def refs_from_sql(sql: str) -> Refs:
     return refs
 
 
-def _effective_template(template: dict, library: dict) -> dict:
-    """Template da analizzare: quello della Query Library se la query è importata in "latest"."""
-    if template.get("isImported"):
-        uuid = template.get("playgroundQueryUuid")
-        save_id = template.get("playgroundQuerySaveId")
-        lib_query = library.get(uuid) if uuid else None
-        if lib_query and save_id in (None, "", "latest"):
-            return lib_query.get("template") or template
-    return template
+def library_uuid(template: dict, library: dict) -> str | None:
+    """
+    Uuid della query della Query Library a cui il plugin fa riferimento, se la pagina
+    esegue la versione corrente della Library (`playgroundQuerySaveId` "latest").
+    Con una versione fissata, o con una query della Library non visibile (privata di un
+    altro utente), restituisce None: la copia salvata nella pagina conta come query propria.
+    """
+    if not template.get("isImported"):
+        return None
+    uuid = template.get("playgroundQueryUuid")
+    if uuid and uuid in library and template.get("playgroundQuerySaveId") in (None, "", "latest"):
+        return uuid
+    return None
 
 
-def refs_from_template(template: dict, library: dict | None = None) -> Refs:
-    """Estrae i riferimenti dal `template` di un plugin SQL."""
-    template = _effective_template(template, library or {})
-
+def refs_from_template(template: dict) -> Refs:
+    """Estrae i riferimenti dal `template` di un plugin SQL (o di una query della Library)."""
     if template.get("editorMode") == "gui":
         refs = Refs()
         table = (template.get("tableName") or "").strip()
@@ -210,16 +214,33 @@ def refs_from_template(template: dict, library: dict | None = None) -> Refs:
     return refs_from_sql(query)
 
 
-def refs_from_app_state(app_state: dict, library: dict | None = None) -> Refs:
-    """Unisce i riferimenti di tutte le query SQL di `page.plugins` (moduli incorporati esclusi)."""
-    refs = Refs()
+@dataclass
+class PageRefs:
+    """Riferimenti di una pagina: oggetti delle sue query + query della Library che importa."""
+    own: Refs = field(default_factory=Refs)
+    library_uuids: set[str] = field(default_factory=set)
+
+
+def refs_from_app_state(app_state: dict, library: dict | None = None) -> PageRefs:
+    """
+    Analizza le query SQL di `page.plugins` (moduli incorporati esclusi).
+    Le query importate dalla Library in versione "latest" non contribuiscono agli oggetti
+    della pagina: vengono solo registrate in `library_uuids` e analizzate a parte.
+    """
+    library = library or {}
+    result = PageRefs()
     plugins = app_state.get("plugins") or {}
     if not isinstance(plugins, dict):
-        return refs
+        return result
     for pdef in plugins.values():
         if not isinstance(pdef, dict) or pdef.get("subtype") not in SQL_SUBTYPES:
             continue
         template = pdef.get("template")
-        if isinstance(template, dict):
-            refs.update(refs_from_template(template, library))
-    return refs
+        if not isinstance(template, dict):
+            continue
+        uuid = library_uuid(template, library)
+        if uuid:
+            result.library_uuids.add(uuid)
+        else:
+            result.own.update(refs_from_template(template))
+    return result

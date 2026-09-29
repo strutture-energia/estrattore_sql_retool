@@ -28,11 +28,13 @@ Richiede Node.js e `retool-cli` (`npm i -g retool-cli`).
    `SqlQueryUnified`/`SqlQuery` della pagina stessa:
    - modalità SQL: parsing con sqlglot (regex di riserva se il parser fallisce);
    - modalità GUI: tabella da `tableName`;
-   - query importate dalla Query Library in versione `latest`: si usa il testo della Library.
-3. I nomi trovati vengono classificati con `information_schema.TABLES` / `ROUTINES`.
+   - query importate dalla Query Library in versione `latest`: la pagina riporta solo il nome della query.
+3. Ogni query della Query Library viene analizzata una volta, come componente a sé, con l'elenco
+   delle pagine che la usano (`usata_da`).
+4. I nomi trovati vengono classificati con `information_schema.TABLES` / `ROUTINES`.
 
-Le query dei moduli incorporati in un'app **non** vengono attribuite all'app: il modulo
-compare come pagina a sé con i propri oggetti.
+Le query dei moduli incorporati e quelle della Query Library **non** vengono attribuite all'app:
+compaiono come voci a sé con i propri oggetti.
 
 ## Output
 
@@ -41,11 +43,19 @@ compare come pagina a sé con i propri oggetti.
   "generato_il": "2026-09-28T12:00:00",
   "database": "…",
   "totale_pagine": 746,
+  "totale_query_library": 220,
   "pagine": [{
     "nome": "modulo_elenco_messaggi", "cartella": "…", "uuid": "…",
     "tipo": "modulo", "aggiornata_il": "…",
-    "stored_procedure": ["st_get_elenco_conversazioni", "st_update_stato_lettura_messaggi"],
+    "query_library": ["st_update_stato_lettura_messaggi"],
+    "stored_procedure": ["st_get_elenco_conversazioni"],
     "viste": [], "tabelle": [], "funzioni": [], "non_trovati": []
+  }],
+  "query_library": [{
+    "nome": "anagrafica_persona_giuridica_update", "uuid": "…", "aggiornata_il": "…",
+    "stored_procedure": ["st_upsert_recapito"], "viste": [],
+    "tabelle": ["anagrafica", "anagrafica_persona_giuridica"], "funzioni": [], "non_trovati": [],
+    "usata_da": [{"nome": "Anagrafiche di progetto", "cartella": "root", "uuid": "…"}]
   }]
 }
 ```
